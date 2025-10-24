@@ -1,5 +1,6 @@
+import jsPDF from "jspdf";
 import React, { useEffect, useState } from "react";
-import { supabase } from "../supabaseClient"; 
+import { supabase } from "../supabaseClient";
 
 function AIChat() {
   const [input, setInput] = useState("");
@@ -34,57 +35,90 @@ function AIChat() {
   };
 
   const handleDelete = async (id) => {
-    await supabase.from("chat_history").delete().eq("id", id);
+    // 1️⃣ Supabase se delete karo
+    const { error } = await supabase.from("chat_history").delete().eq("id", id);
+
+    if (error) {
+      console.error("Delete error:", error.message);
+      return;
+    }
+
+    // 2️⃣ React state se remove karo
     setMessages((prev) => prev.filter((msg) => msg.id !== id));
   };
 
-  
+
+
   const handleEditStart = (id, content) => {
     setEditingId(id);
     setEditingText(content);
   };
 
-  
+
   const handleEditSave = async (id) => {
-    const { error } = await supabase
+
+    const { data, error } = await supabase
       .from("chat_history")
       .update({ content: editingText })
-      .eq("id", id);
+      .eq("id", id)
+      .select();
 
-    if (!error) {
+    if (!error && data) {
+
       setMessages((prev) =>
         prev.map((msg) =>
           msg.id === id ? { ...msg, content: editingText } : msg
         )
       );
+
+
+      const editedMsg = data[0];
+      if (editedMsg.role === "user") {
+
+        await supabase.from("chat_history").delete()
+          .eq("reply_to", id);
+        const res = await fetch(GROQ_API_URL, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${GROQ_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: "llama-3.1-8b-instant",
+            messages: [{ role: "user", content: editingText }],
+          }),
+        });
+        const data = await res.json();
+        const aiText = data?.choices?.[0]?.message?.content || "No response.";
+
+        await saveMessage("assistant", aiText);
+      }
+
       setEditingId(null);
       setEditingText("");
     }
   };
 
-  
+
   const handleChat = async () => {
     if (!input.trim()) return;
-    const userMsg = { role: "user", content: input };
-    setMessages((prev) => [...prev, userMsg]);
+
     setLoading(true);
 
-    
+
+    await saveMessage("user", input);
+
+
     if (input.toLowerCase().includes("image")) {
       const prompt = input.replace(/generate|image|of/gi, "").trim();
       const imgUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}`;
-      const imgMsg = {
-        role: "assistant",
-        content: `Here’s your image of ${prompt}:`,
-        image: imgUrl,
-      };
-      setMessages((prev) => [...prev, imgMsg]);
+      await saveMessage("assistant", `Here’s your image of ${prompt}:`, imgUrl);
       setInput("");
       setLoading(false);
       return;
     }
 
-    
+
     try {
       const res = await fetch(GROQ_API_URL, {
         method: "POST",
@@ -100,22 +134,80 @@ function AIChat() {
 
       const data = await res.json();
       const aiText = data?.choices?.[0]?.message?.content || "No response.";
-      const aiMsg = { role: "assistant", content: aiText };
-      setMessages((prev) => [...prev, aiMsg]);
+      await saveMessage("assistant", aiText);
     } catch (err) {
-      const errMsg = { role: "assistant", content: "❌ Error: " + err.message };
-      setMessages((prev) => [...prev, errMsg]);
+      await saveMessage("assistant", `❌ Error: ${err.message}`);
     }
 
     setInput("");
     setLoading(false);
   };
 
+  const handleNewChat = () => {
+    setMessages([]);
+    setInput("");
+    setEditingId(null);
+    setEditingText("");
+  };
+
+
+  const handleDownloadPDF = () => {
+    if (messages.length === 0) {
+      alert("No messages to export!");
+      return;
+    }
+
+    const doc = new jsPDF();
+    let y = 20;
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(16);
+    doc.text("💬 Chat Conversation Export", 20, 15);
+
+    messages.forEach((msg, index) => {
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(12);
+
+      const sender = msg.role === "user" ? "🧑 You: " : "🤖 AI: ";
+      const text = `${sender}${msg.content}`;
+
+      const splitText = doc.splitTextToSize(text, 170);
+      doc.text(splitText, 20, y);
+
+      y += splitText.length * 7;
+
+      if (y > 270) {
+        doc.addPage();
+        y = 20;
+      }
+    });
+
+    doc.save(`chat- "conversation"}.pdf`);
+  };
+
+
+
+
   return (
     <div className="min-h-screen bg-gray-900 flex flex-col items-center p-4">
       <div className="w-full max-w-2xl bg-gray-800 rounded-2xl shadow-lg border border-gray-700 flex flex-col overflow-hidden">
         <div className="bg-gray-700 text-center py-3 text-blue-400 font-bold text-xl">
           🤖 Groq AI Chat + Image + Supabase (Edit / Delete)
+          <div className=" text-center py-3 flex justify-between items-center px-4">
+            <button
+              onClick={handleNewChat}
+              className="bg-red-600 hover:bg-red-700 text-white text-sm px-3 py-1 rounded-md"
+            >
+              🆕 New Chat
+            </button>
+            <button
+              onClick={handleDownloadPDF}
+              className="bg-green-600 hover:bg-green-700 text-white text-sm px-3 py-1 rounded-md ml-2"
+            >
+              📄 Download PDF
+            </button>
+
+          </div>
         </div>
 
         {/* Chat Messages */}
@@ -123,16 +215,14 @@ function AIChat() {
           {messages.map((msg) => (
             <div
               key={msg.id}
-              className={`flex ${
-                msg.role === "user" ? "justify-end" : "justify-start"
-              }`}
+              className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"
+                }`}
             >
               <div
-                className={`relative max-w-[80%] px-4 py-3 rounded-2xl ${
-                  msg.role === "user"
-                    ? "bg-blue-600 text-white"
-                    : "bg-gray-700 text-gray-100"
-                }`}
+                className={`relative max-w-[80%] px-4 py-3 rounded-2xl ${msg.role === "user"
+                  ? "bg-blue-600 text-white"
+                  : "bg-gray-700 text-gray-100"
+                  }`}
               >
                 {editingId === msg.id ? (
                   <div className="flex flex-col gap-2">
@@ -190,6 +280,9 @@ function AIChat() {
           )}
         </div>
 
+
+
+
         {/* Input Section */}
         <div className="p-4 border-t border-gray-700 flex gap-2">
           <input
@@ -203,11 +296,10 @@ function AIChat() {
           <button
             onClick={handleChat}
             disabled={loading}
-            className={`px-5 py-3 rounded-lg text-white font-semibold transition ${
-              loading
-                ? "bg-gray-500 cursor-not-allowed"
-                : "bg-blue-600 hover:bg-blue-700"
-            }`}
+            className={`px-5 py-3 rounded-lg text-white font-semibold transition ${loading
+              ? "bg-gray-500 cursor-not-allowed"
+              : "bg-blue-600 hover:bg-blue-700"
+              }`}
           >
             {loading ? "..." : "Send"}
           </button>
